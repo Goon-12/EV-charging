@@ -1,0 +1,6 @@
+method,peak_grid_kw,total_energy_kwh,total_unmet_energy_kwh,evs_fully_charged,grid_limit_violations,charger_limit_violations
+Uncontrolled,305.163,1511.277,2.284,98,,
+FCFS,94.833,1061.452,452.109,63,,
+GA,108.746,1223.18,290.381,38,0.0,0.0
+PSO,106.367,1164.223,349.338,24,0.0,0.0
+Feasibility-first,95.567,1166.568,346.993,41,0.0,0.0

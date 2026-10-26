@@ -1,0 +1,9 @@
+method,required_kwh,delivered_kwh,unmet_kwh,demand_met_pct,fully_charged_evs,peak_ev_load_kw,peak_grid_import_kw_after_solar,solar_used_kwh,grid_limit_violations,charger_limit_violations,power_violations,time_window_violations,feasible
+Uncontrolled,1513.561,1511.277,2.284,99.849,98,305.163,305.163,8.123,24,28,0,0,False
+FCFS,1513.561,1061.452,452.109,70.129,63,94.833,94.833,15.06,0,0,0,0,True
+Original GA,1513.561,1223.18,290.381,80.815,38,108.746,108.746,20.437,0,0,0,0,True
+PSO,1513.561,1164.223,349.338,76.919,24,106.367,106.367,19.803,0,0,0,0,True
+Feasibility-first,1513.561,1166.568,346.993,77.074,41,95.567,95.567,23.599,0,0,0,0,True
+Cost-aware GA,1513.561,1115.843,397.719,73.723,61,96.664,96.664,20.437,0,0,0,0,True
+Solar-aware,1513.561,1139.255,374.306,75.27,62,100.128,100.128,20.437,0,0,0,0,True
+Solar-aware GA,1513.561,1116.933,396.629,73.795,61,96.664,96.664,22.721,0,0,0,0,True

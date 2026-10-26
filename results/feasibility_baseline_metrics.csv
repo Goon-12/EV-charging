@@ -1,0 +1,2 @@
+method,peak_grid_kw,total_energy_kwh,total_unmet_energy_kwh,evs_fully_charged,grid_limit_violations,charger_limit_violations,individual_power_violations,time_window_violations
+Feasibility-first,95.56670096625571,1166.5680006637826,346.9931876693072,41,0,0,0,0

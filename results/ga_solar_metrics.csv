@@ -1,0 +1,2 @@
+objective,unmet_energy_kwh,delivered_energy_kwh,cost_units,peak_grid_kw,solar_used_kwh,solar_available_kwh,fully_charged_evs,method,grid_limit_violations,charger_limit_violations,individual_power_violations,time_window_violations,feasible
+396708671.87179893,396.62850936907995,1116.9326789640104,7060.971443534253,96.66391885310277,22.720720320995337,566.503249755201,61,Solar-aware GA,0,0,0,0,True

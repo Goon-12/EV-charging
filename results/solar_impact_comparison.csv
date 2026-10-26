@@ -1,0 +1,7 @@
+method,ev_energy_kwh,solar_available_kwh,solar_used_kwh,grid_import_kwh,excess_solar_kwh,solar_share_of_ev_energy_pct,solar_utilization_pct,peak_ev_load_kw,peak_grid_import_kw
+Uncontrolled,1511.277,566.503,8.123,1503.154,558.38,0.537,1.434,305.163,305.163
+FCFS,1061.452,566.503,15.06,1046.392,551.443,1.419,2.658,94.833,94.833
+Original GA,1223.18,566.503,20.437,1202.743,546.067,1.671,3.607,108.746,108.746
+PSO,1164.223,566.503,19.803,1144.42,546.7,1.701,3.496,106.367,106.367
+Feasibility-first,1166.568,566.503,23.599,1142.969,542.904,2.023,4.166,95.567,95.567
+Cost-aware GA,1115.843,566.503,20.437,1095.406,546.067,1.831,3.607,96.664,96.664

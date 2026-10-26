@@ -1,0 +1,3 @@
+peak_grid_kw,total_energy_kwh,total_unmet_energy_kwh,evs_fully_charged,grid_limit_violations,charger_limit_violations,individual_power_violations,time_window_violations,method,max_grid_limit_kw
+305.16260186837906,1511.2771980543462,2.2839902787438158,98,24,28,0,0,Uncontrolled,125.0
+94.83333769052138,1061.45196783009,452.1092205029999,63,0,0,0,0,FCFS,125.0

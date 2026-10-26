@@ -1,0 +1,7 @@
+method,delivered_energy_kwh,high_power_stress_proxy,interpretation
+Original GA,1223.18,0.9894,Lower means less high-power charging under this proxy
+PSO,1164.223,0.9507,Lower means less high-power charging under this proxy
+Feasibility-first,1166.568,0.9886,Lower means less high-power charging under this proxy
+Cost-aware GA,1115.843,0.9847,Lower means less high-power charging under this proxy
+Solar-aware,1139.255,0.9851,Lower means less high-power charging under this proxy
+Solar-aware GA,1116.933,0.9847,Lower means less high-power charging under this proxy
