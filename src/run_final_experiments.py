@@ -1,93 +1,340 @@
-"""Run comparable one-shot and rolling-horizon experiments."""
+"""
+The single command that regenerates every headline result.
+
+    .venv/Scripts/python src/run_final_experiments.py
+
+Produces, all through one evaluator and one repair routine:
+
+* ``results/final_unified/comparison_metrics.csv`` - every method side by side
+* ``results/final_unified/schedules.npz``         - the schedules themselves
+* ``results/final_unified/run_manifest.csv``      - mode, settings, seeds, input hashes
+* ``results/ga_*`` / ``results/pso_*``            - per-algorithm schedule,
+  convergence history/plot, metrics and load profile
+* ``results/baseline_metrics.csv``                - all conventional policies
+* with ``--multi-seed``: ``multi_seed_results.csv`` and ``multi_seed_summary.csv``
+
+Before Tier 0 this file and ``final_comparision.py`` produced different tables
+from different evaluators, and a third script (``benchmark_algorithms.py``)
+produced the multi-seed table by launching the two legacy pipelines as
+subprocesses and scraping their stdout with regular expressions. Both are now
+archived in ``experiments/legacy/``.
+
+``run_ga.py`` and ``run_pso.py`` delegate to ``run_single_algorithm`` below so
+there is exactly one implementation of "run an optimizer and write its files".
+"""
 from __future__ import annotations
-import argparse, time
+
+import argparse
+import hashlib
+import json
+import time
+from datetime import datetime, timezone
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from multiobjective_core import load_inputs, evaluate_schedule, objective, STEP_HOURS, repair_schedule
+
+import config as cfg
+from artifacts import (
+    RESULT_COLUMNS,
+    metrics_row,
+    save_convergence_csv,
+    save_convergence_plot,
+    save_load_profile_plot,
+    save_metrics_csv,
+    save_schedule_csv,
+)
+from baselines import all_baselines
+from multiobjective_core import load_inputs
 from multiobjective_optimizers import optimize_ga, optimize_pso
 from run_rolling_horizon import optimize_rolling
 
-def make_baseline(ev, solar):
-    n_ev=len(ev); n_slots=len(solar)
-    # FCFS: earlier-arriving vehicles receive higher constant priority.
-    arr=ev["arrival_slot"].to_numpy(float)
-    rank=(arr.max()-arr)/(max(arr.max()-arr.min(),1.0))
-    fcfs_priority=np.repeat(rank[:,None],n_slots,axis=1)
-    fcfs=repair_schedule(fcfs_priority,ev,solar)
-    # EDF/urgency baseline: priority increases as departure approaches.
-    a=ev["arrival_slot"].to_numpy(int); d=ev["departure_slot"].to_numpy(int)
-    urg=np.zeros((n_ev,n_slots))
-    for t in range(n_slots):
-        eligible=(a<=t)&(d>t)
-        urg[eligible,t]=1/np.maximum(d[eligible]-t,1)
-    edf=repair_schedule(urg,ev,solar)
-    # Uncontrolled: each EV charges at max power whenever connected, ignoring site limits.
-    uncontrolled=np.zeros((n_ev,n_slots))
-    req=ev["required_energy_kwh"].to_numpy(float)
-    pmax=ev["max_power_kw"].to_numpy(float)
-    for i in range(n_ev):
-        rem=req[i]
-        for t in range(max(0,a[i]),min(n_slots,d[i])):
-            p=min(pmax[i],rem/STEP_HOURS)
-            uncontrolled[i,t]=p
-            rem-=p*STEP_HOURS
-            if rem<=1e-8: break
-    return {"FCFS":fcfs,"EDF":edf,"Uncontrolled (infeasible reference)":uncontrolled}
+
+def settings(quick):
+    """Optimizer settings for a full or smoke-test run."""
+    if quick:
+        return {
+            "ga": dict(population_size=8, generations=5),
+            "pso": dict(particles=6, iterations=4),
+            "rolling": dict(population_size=6, generations=3, particles=4, iterations=2),
+        }
+    return {
+        "ga": dict(population_size=cfg.GA_POPULATION_SIZE, generations=cfg.GA_GENERATIONS),
+        "pso": dict(particles=cfg.PSO_PARTICLES, iterations=cfg.PSO_ITERATIONS),
+        "rolling": dict(
+            population_size=cfg.ROLLING_GA_POPULATION_SIZE,
+            generations=cfg.ROLLING_GA_GENERATIONS,
+            particles=cfg.ROLLING_PSO_PARTICLES,
+            iterations=cfg.ROLLING_PSO_ITERATIONS,
+        ),
+    }
+
+
+def count_ga_evaluations(population_size, generations, elite_count=2):
+    """
+    Exact number of objective evaluations a GA run performs.
+
+    The initial population is evaluated once and each generation evaluates only
+    its children, because elites keep their score from the previous generation.
+    """
+    return population_size + generations * (
+        population_size - min(elite_count, population_size)
+    )
+
+
+def algorithm_spec(name, conf, seed=None):
+    """Return ``(optimizer, kwargs, evaluation_budget)`` for ``name``."""
+    key = name.strip().lower()
+    if key == "ga":
+        kwargs = dict(conf["ga"])
+        if seed is not None:
+            kwargs["seed"] = seed
+        return optimize_ga, kwargs, count_ga_evaluations(**conf["ga"])
+    if key == "pso":
+        kwargs = dict(conf["pso"])
+        if seed is not None:
+            kwargs["seed"] = seed
+        budget = conf["pso"]["particles"] * (1 + conf["pso"]["iterations"])
+        return optimize_pso, kwargs, budget
+    raise ValueError(f"Unknown algorithm: {name!r} (expected 'GA' or 'PSO')")
+
+
+def write_algorithm_artifacts(name, schedule, history, row, ev, solar, out_dir):
+    """Write the per-algorithm schedule, convergence, metrics and profile files."""
+    stem = name.strip().lower().replace(" ", "_")
+    out_dir = Path(out_dir)
+    save_schedule_csv(out_dir / f"{stem}_best_schedule.csv", schedule, ev)
+    if history:
+        save_convergence_csv(out_dir / f"{stem}_convergence.csv", history)
+        save_convergence_plot(
+            out_dir / f"{stem}_convergence.png", history, f"{name} convergence"
+        )
+    save_metrics_csv(out_dir / f"{stem}_metrics.csv", row, name)
+    save_load_profile_plot(
+        out_dir / f"{stem}_load_profile.png", schedule, solar,
+        f"{name} charging load profile",
+    )
+
+
+def run_single_algorithm(
+    name, quick=False, seed=None, out_dir=None, verbose=True, overrides=None
+):
+    """
+    Run one metaheuristic end to end and write its artifacts.
+
+    Returns ``(metrics_row, schedule)``. This is what ``run_ga.py`` and
+    ``run_pso.py`` call, so there is one implementation for both.
+    ``overrides`` replaces individual optimizer settings (e.g. a larger
+    population) and recomputes the reported evaluation budget accordingly.
+    """
+    out_dir = cfg.RESULTS_DIR if out_dir is None else Path(out_dir)
+    ev, solar = load_inputs()
+    conf = settings(quick)
+    optimizer, kwargs, evaluations = algorithm_spec(name, conf, seed)
+    if overrides:
+        kwargs.update(overrides)
+        if name.strip().lower() == "ga":
+            evaluations = count_ga_evaluations(
+                kwargs["population_size"], kwargs["generations"]
+            )
+        else:
+            evaluations = kwargs["particles"] * (1 + kwargs["iterations"])
+
+    history = []
+    started = time.perf_counter()
+    schedule, score = optimizer(ev, solar, history=history, **kwargs)
+    elapsed = time.perf_counter() - started
+
+    row = metrics_row(schedule, ev, solar, name, evaluations, elapsed)
+    write_algorithm_artifacts(name, schedule, history, row, ev, solar, out_dir)
+
+    if verbose:
+        print(f"\n{name} finished in {elapsed:.1f} s "
+              f"({evaluations} evaluations, objective {score:.6f})")
+        print(f"  delivered      : {row['delivered_energy_kwh']:.3f} kWh "
+              f"({row['demand_met_pct']:.2f}% of required)")
+        print(f"  unmet energy   : {row['unmet_energy_kwh']:.3f} kWh")
+        print(f"  fully charged  : {row['fully_charged_evs']} / {len(ev)} EVs")
+        print(f"  peak EV load   : {row['peak_ev_load_kw']:.3f} kW "
+              f"(grid limit {cfg.MAX_GRID_KW:.0f} kW)")
+        print(f"  tariff cost    : {row['grid_cost_units']:.3f} units "
+              f"({row['cost_per_delivered_kwh']:.3f} per kWh)")
+        print(f"  violations     : {row['constraint_violations']}")
+        print(f"  artifacts      : {out_dir}")
+    return row, schedule
+
+
+def run_rolling(name, method, ev, solar, rolling_kwargs):
+    """Run the rolling-horizon controller for one optimizer."""
+    started = time.perf_counter()
+    schedule = optimize_rolling(ev, solar, method=method, **rolling_kwargs)
+    elapsed = time.perf_counter() - started
+    return metrics_row(schedule, ev, solar, name, 0, elapsed), schedule
+
+
+def file_digest(path, length=16):
+    """Short content hash so results can be tied to the exact inputs used."""
+    path = Path(path)
+    if not path.exists():
+        return "missing"
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:length]
+
+
+def write_run_manifest(out_dir, ev, solar, conf, args):
+    """
+    Record exactly how these results were produced.
+
+    The committed ``comparison_metrics.csv`` that Tier 0 investigated turned out
+    to be a ``--quick`` smoke-test output: nothing in the file said so, and a
+    38-evaluation GA (1089 kWh) looks just as plausible as a 560-evaluation one
+    (1116 kWh) when read on its own. Every run now writes its mode, settings,
+    seeds and input hashes next to its numbers.
+    """
+    scenario = cfg.DEFAULT_SCENARIO if args.scenario is None else args.scenario
+    solar_path = cfg.DEFAULT_SOLAR if args.solar is None else args.solar
+    manifest = {
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "mode": "quick" if args.quick else "full",
+        "rolling_horizon": not args.skip_rolling,
+        "multi_seed": args.multi_seed,
+        "scenario_path": str(scenario),
+        "scenario_sha256_16": file_digest(scenario),
+        "solar_path": str(solar_path),
+        "solar_sha256_16": file_digest(solar_path),
+        "n_ev": len(ev),
+        "n_slots": len(solar),
+        "n_chargers": cfg.N_CHARGERS,
+        "max_grid_kw": cfg.MAX_GRID_KW,
+        "step_hours": cfg.STEP_HOURS,
+        "objective_weights": json.dumps(cfg.OBJECTIVE_WEIGHTS),
+        "ga_settings": json.dumps(conf["ga"]),
+        "ga_seed": cfg.GA_SEED,
+        "pso_settings": json.dumps(conf["pso"]),
+        "pso_seed": cfg.PSO_SEED,
+        "rolling_settings": json.dumps(conf["rolling"]),
+        "rolling_seed": cfg.ROLLING_SEED,
+        "multi_seed_seeds": json.dumps(list(cfg.SEEDS)),
+    }
+    path = Path(out_dir) / "run_manifest.csv"
+    pd.DataFrame([manifest]).to_csv(path, index=False)
+    return path
+
+
+def run_multi_seed(ev, solar, out_dir, quick=False):
+    """
+    Repeat GA and PSO over the configured seed list, in process.
+
+    The pre-Tier-0 version of this ran ``run_ga.py``/``run_pso.py`` as
+    subprocesses and recovered metrics by regex-matching their console output,
+    so any change to a printed label silently broke the benchmark. Everything
+    now runs in process against the shared evaluator.
+    """
+    conf = settings(quick)
+    rows = []
+    for seed in cfg.SEEDS:
+        for name in ("GA", "PSO"):
+            optimizer, kwargs, evaluations = algorithm_spec(name, conf, seed)
+            schedule, _ = optimizer(ev, solar, **kwargs)
+            row = metrics_row(schedule, ev, solar, name, evaluations)
+            row["seed"] = seed
+            rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    out_dir = Path(out_dir)
+    frame.to_csv(out_dir / "multi_seed_results.csv", index=False)
+
+    summary = frame.groupby("method").agg(
+        runs=("seed", "count"),
+        delivered_mean=("delivered_energy_kwh", "mean"),
+        delivered_std=("delivered_energy_kwh", "std"),
+        peak_mean=("peak_ev_load_kw", "mean"),
+        peak_std=("peak_ev_load_kw", "std"),
+        cost_mean=("grid_cost_units", "mean"),
+        cost_std=("grid_cost_units", "std"),
+        unmet_mean=("unmet_energy_kwh", "mean"),
+        unmet_std=("unmet_energy_kwh", "std"),
+    ).reset_index()
+    summary.to_csv(out_dir / "multi_seed_summary.csv", index=False)
+
+    print(f"\nMULTI-SEED SUMMARY (mean +/- std over seeds {list(cfg.SEEDS)})")
+    print(summary.round(3).to_string(index=False))
+    return frame, summary
+
 
 def main():
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--scenario",default="data/processed/ev_scenario.csv")
-    ap.add_argument("--solar",default="data/processed/solar_profile_36h.csv")
-    ap.add_argument("--out",default="results/final_unified")
-    ap.add_argument("--quick",action="store_true",help="Use smaller GA/PSO settings for a smoke test.")
-    ap.add_argument("--skip-rolling",action="store_true",help="Skip rolling-horizon runs.")
-    args=ap.parse_args()
-    ev,solar=load_inputs(args.scenario,args.solar)
-    out=Path(args.out); out.mkdir(parents=True,exist_ok=True)
-    if args.quick:
-        ga_kw=dict(population_size=8,generations=5,seed=46)
-        pso_kw=dict(particles=6,iterations=4,seed=42)
-    else:
-        ga_kw=dict(population_size=20,generations=30,seed=46)
-        pso_kw=dict(particles=12,iterations=15,seed=42)
-    schedules={}; rows=[]
-    def record(name,schedule,seconds):
-        metrics=evaluate_schedule(schedule,ev,solar)
-        metrics["method"]=name
-        metrics["objective_score"]=objective(schedule,ev,solar)
-        metrics["runtime_seconds"]=seconds
-        rows.append(metrics); schedules[name]=schedule
-    for name,fn,kw in [("GA",optimize_ga,ga_kw),("PSO",optimize_pso,pso_kw)]:
-        t0=time.perf_counter(); schedule,score=fn(ev,solar,**kw); elapsed=time.perf_counter()-t0
-        record(name,schedule,elapsed)
-    if not args.skip_rolling:
-        for method,name in [("ga","GA rolling horizon"),("pso","PSO rolling horizon")]:
-            t0=time.perf_counter()
-            if args.quick:
-                schedule=optimize_rolling(ev,solar,method=method,window_slots=24,
-                    population_size=6,generations=3,particles=4,iterations=2,
-                    seed=46 if method=="ga" else 42)
-            else:
-                schedule=optimize_rolling(ev,solar,method=method,window_slots=24,
-                    population_size=8,generations=5,particles=6,iterations=4,
-                    seed=46 if method=="ga" else 42)
-            record(name,schedule,time.perf_counter()-t0)
-    for name,schedule in make_baseline(ev,solar).items():
-        record(name,schedule,0.0)
-    table=pd.DataFrame(rows)
-    # Put method first, then key performance metrics.
-    cols=["method","objective_score","required_energy_kwh","delivered_energy_kwh","unmet_energy_kwh",
-          "demand_met_pct","fully_charged_evs","peak_ev_load_kw","peak_grid_import_kw",
-          "grid_cost_units","solar_used_kwh","solar_utilization_pct","battery_stress_proxy",
-          "constraint_violations","runtime_seconds"]
-    table=table[cols].sort_values("method")
-    table.to_csv(out/"comparison_metrics.csv",index=False)
-    np.savez_compressed(out/"schedules.npz",**schedules)
-    print("\nComparison results (all schedules use the same evaluator):")
-    print(table.to_string(index=False,float_format=lambda x:f"{x:.3f}"))
-    print(f"\nSaved: {out/'comparison_metrics.csv'}")
-    print(f"Saved: {out/'schedules.npz'}")
-    print("Interpretation: uncontrolled is intentionally allowed to violate site constraints; use it only as a reference.")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", default=None)
+    parser.add_argument("--solar", default=None)
+    parser.add_argument("--out", default=str(cfg.RESULTS_DIR / "final_unified"))
+    parser.add_argument("--quick", action="store_true",
+                        help="Tiny GA/PSO settings for a smoke test.")
+    parser.add_argument("--skip-rolling", action="store_true",
+                        help="Skip the rolling-horizon controller (slow).")
+    parser.add_argument("--multi-seed", action="store_true",
+                        help="Also repeat GA/PSO over config.SEEDS.")
+    args = parser.parse_args()
 
-if __name__=="__main__": main()
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ev, solar = load_inputs(args.scenario, args.solar)
+    conf = settings(args.quick)
+    print(f"Mode: {'QUICK (smoke test)' if args.quick else 'FULL'}")
+    print(f"Scenario: {len(ev)} EVs, {len(solar)} slots, "
+          f"required energy {ev['required_energy_kwh'].sum():.1f} kWh")
+    print(f"Site limits: {cfg.N_CHARGERS} chargers, {cfg.MAX_GRID_KW:.0f} kW grid")
+
+    rows, schedules = [], {}
+
+    for name in ("GA", "PSO"):
+        row, schedule = run_single_algorithm(name, args.quick, out_dir=cfg.RESULTS_DIR)
+        rows.append(row)
+        schedules[name] = schedule
+
+    if not args.skip_rolling:
+        for method, name in (("ga", "GA rolling horizon"), ("pso", "PSO rolling horizon")):
+            print(f"\nRunning {name}...")
+            row, schedule = run_rolling(name, method, ev, solar, conf["rolling"])
+            rows.append(row)
+            schedules[name] = schedule
+            print(f"  {name}: delivered {row['delivered_energy_kwh']:.1f} kWh, "
+                  f"peak {row['peak_ev_load_kw']:.1f} kW, "
+                  f"violations {row['constraint_violations']}")
+
+    print("\nRunning conventional baselines...")
+    baselines = all_baselines(ev, solar)
+    baseline_rows = []
+    for name, schedule in baselines.items():
+        row = metrics_row(schedule, ev, solar, name)
+        baseline_rows.append(row)
+        rows.append(row)
+        schedules[name] = schedule
+
+    table = pd.DataFrame(rows)
+    table = table[RESULT_COLUMNS].sort_values("method").reset_index(drop=True)
+    table.to_csv(out_dir / "comparison_metrics.csv", index=False)
+    np.savez_compressed(out_dir / "schedules.npz", **schedules)
+
+    pd.DataFrame(baseline_rows)[RESULT_COLUMNS].to_csv(
+        cfg.RESULTS_DIR / "baseline_metrics.csv", index=False
+    )
+
+    manifest_path = write_run_manifest(out_dir, ev, solar, conf, args)
+
+    print("\n" + "=" * 100)
+    print("COMPARISON (every row uses the same objective, repair and evaluator)")
+    print("=" * 100)
+    print(table.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    print(f"\nSaved: {out_dir / 'comparison_metrics.csv'}")
+    print(f"Saved: {out_dir / 'schedules.npz'}")
+    print(f"Saved: {manifest_path}")
+    print("Note: 'Uncontrolled' is deliberately infeasible and is a reference only.")
+    print("Note: total cost and peak are volume metrics - read them alongside "
+          "delivered energy or cost_per_delivered_kwh (see docs/TIER0_CHANGES.md).")
+
+    if args.multi_seed:
+        run_multi_seed(ev, solar, out_dir, args.quick)
+
+
+if __name__ == "__main__":
+    main()

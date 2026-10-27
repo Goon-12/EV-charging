@@ -1,0 +1,27 @@
+# --- Python environment -------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- Python bytecode / caches ------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Packaging ---------------------------------------------------------
+*.egg-info/
+build/
+dist/
+
+# --- Editors / OS ------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Large raw dataset (ACN-Data) --------------------------------------
+# Kept locally; not suitable for version control.
+data/raw/

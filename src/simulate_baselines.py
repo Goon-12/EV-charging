@@ -1,244 +1,139 @@
+"""
+Build the frozen EV charging scenario and evaluate the conventional baselines.
 
-from pathlib import Path
+    .venv/Scripts/python src/create_solar_profile.py     # once
+    .venv/Scripts/python src/simulate_baselines.py
+
+Writes:
+
+* ``data/processed/ev_scenario.csv``  - THE scenario every algorithm is compared on
+* ``results/uncontrolled_schedule.csv``, ``results/fcfs_schedule.csv``
+* ``results/baseline_metrics.csv``, ``results/baseline_load_profiles.png``
+
+The scenario is a build product. Run this once and freeze the CSV: comparing
+algorithms on regenerated scenarios would make every difference meaningless.
+
+Tier 0 changes
+--------------
+* The local ``run_fcfs`` implementation was deleted. It was NOT genuine FCFS and
+  it used a different per-slot capacity rule (``max_grid_kw`` instead of
+  ``max_grid_kw + solar``) from the shared repair routine, so the "FCFS"
+  baseline and the optimizers were not solving the same problem. Baselines now
+  come from ``src/baselines.py``.
+* The local evaluator (``evaluate_schedule.py``) was replaced by the single
+  shared one in ``src/multiobjective_core.py``; the old module is archived in
+  ``experiments/legacy/``.
+* Scenario generation is UNCHANGED, down to the order of the random draws, so
+  ``ev_scenario.csv`` is byte-identical to the frozen input.
+"""
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-from evaluate_schedule import evaluate_schedule
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-DATA_FILE = PROJECT_DIR / "data" / "processed" / "clean_office_sessions.csv"
-RESULTS_DIR = PROJECT_DIR / "results"
-RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+import config as cfg
+from artifacts import RESULT_COLUMNS, metrics_row, save_load_profile_plot, save_schedule_csv
+from baselines import all_baselines
+from multiobjective_core import load_inputs
 
-# Reproducible simulation settings
-SEED = 42
-N_EV = 100
-N_CHARGERS = 20
-STEP_HOURS = 0.25
-HORIZON_HOURS = 36
-MAX_GRID_KW = 125.0
 
-rng = np.random.default_rng(SEED)
+def build_scenario():
+    """
+    Sample the cleaned ACN sessions into a synthetic apartment scenario.
 
-# Load the cleaned ACN sample
-data = pd.read_csv(DATA_FILE)
+    Energy and power are inspired by measured ACN sessions; arrival and
+    departure windows are SIMULATED assumptions, not observations.
+    """
+    if not cfg.CLEAN_SESSIONS.exists():
+        raise FileNotFoundError(
+            f"Cleaned session data not found: {cfg.CLEAN_SESSIONS}. "
+            "Run src/create_clean_datasets.py first (requires the raw ACN dataset)."
+        )
 
-# Use only sessions with usable provisional energy and power estimates.
-usable = data[
-    (data["energy_delivered_kwh_provisional"] > 0)
-    & data["mean_positive_power_kw"].notna()
-    & (data["mean_positive_power_kw"] > 0)
-].copy()
+    rng = np.random.default_rng(cfg.SCENARIO_SEED)
+    data = pd.read_csv(cfg.CLEAN_SESSIONS)
 
-if len(usable) < N_EV:
-    raise ValueError(
-        f"Only {len(usable)} usable sessions; need at least {N_EV}."
+    usable = data[
+        (data["energy_delivered_kwh_provisional"] > 0)
+        & data["mean_positive_power_kw"].notna()
+        & (data["mean_positive_power_kw"] > 0)
+    ].copy()
+
+    if len(usable) < cfg.N_EV:
+        raise ValueError(
+            f"Only {len(usable)} usable sessions; need at least {cfg.N_EV}."
+        )
+
+    sample = usable.sample(
+        n=cfg.N_EV, replace=True, random_state=cfg.SCENARIO_SEED
+    ).reset_index(drop=True)
+
+    energy = np.clip(
+        sample["energy_delivered_kwh_provisional"].to_numpy(),
+        cfg.ENERGY_MIN_KWH, cfg.ENERGY_MAX_KWH,
+    )
+    power = np.clip(
+        sample["mean_positive_power_kw"].to_numpy(),
+        cfg.POWER_MIN_KW, cfg.POWER_MAX_KW,
     )
 
-# Sample session characteristics to construct a synthetic apartment scenario.
-sample = usable.sample(
-    n=N_EV,
-    replace=True,
-    random_state=SEED
-).reset_index(drop=True)
+    # Draw order matters: it is what makes this file reproducible.
+    arrival_hour = rng.uniform(cfg.ARRIVAL_HOUR_MIN, cfg.ARRIVAL_HOUR_MAX, cfg.N_EV)
+    stay_hours = rng.uniform(cfg.STAY_HOURS_MIN, cfg.STAY_HOURS_MAX, cfg.N_EV)
+    departure_hour = arrival_hour + stay_hours
 
-energy = sample["energy_delivered_kwh_provisional"].to_numpy()
-power = sample["mean_positive_power_kw"].to_numpy()
+    arrival_slot = np.floor(arrival_hour / cfg.STEP_HOURS).astype(int)
+    departure_slot = np.ceil(departure_hour / cfg.STEP_HOURS).astype(int)
+    departure_slot = np.clip(departure_slot, 1, cfg.N_SLOTS)
 
-# Avoid unrealistic outliers dominating this first prototype.
-energy = np.clip(energy, 2.0, 30.0)
-power = np.clip(power, 1.0, 7.0)
-
-
-# Each EV arrives between 17:00 and 21:00 on the first day.
-arrival_hour = rng.uniform(17.0, 21.0, N_EV)
-
-# Departure times are simulated assumptions, not ACN observations.
-stay_hours = rng.uniform(6.0, 12.0, N_EV)
-departure_hour = arrival_hour + stay_hours
-
-# Convert times to 15-minute slots.
-n_slots = int(HORIZON_HOURS / STEP_HOURS)
-slot_hours = np.arange(n_slots) * STEP_HOURS
-
-arrival_slot = np.floor(arrival_hour / STEP_HOURS).astype(int)
-departure_slot = np.ceil(departure_hour / STEP_HOURS).astype(int)
-departure_slot = np.clip(departure_slot, 1, n_slots)
-
-# Per-EV power limits and energy requirements.
-# Energy and power are inspired by ACN observations, while windows are synthetic.
-max_power = power
-required_energy = energy
+    return pd.DataFrame({
+        "ev_id": np.arange(cfg.N_EV),
+        "arrival_hour": arrival_hour,
+        "departure_hour": departure_hour,
+        "arrival_slot": arrival_slot,
+        "departure_slot": departure_slot,
+        "required_energy_kwh": energy,
+        "max_power_kw": power,
+    })
 
 
-# Save the EV scenario so every algorithm uses identical inputs.
-scenario = pd.DataFrame({
-    "ev_id": np.arange(N_EV),
-    "arrival_hour": arrival_hour,
-    "departure_hour": departure_hour,
-    "arrival_slot": arrival_slot,
-    "departure_slot": departure_slot,
-    "required_energy_kwh": required_energy,
-    "max_power_kw": max_power
-})
+def main():
+    cfg.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-scenario_file = PROJECT_DIR / "data" / "processed" / "ev_scenario.csv"
-scenario.to_csv(scenario_file, index=False)
+    scenario = build_scenario()
+    scenario.to_csv(cfg.DEFAULT_SCENARIO, index=False)
+    print(f"Scenario saved to: {cfg.DEFAULT_SCENARIO}")
+    print(scenario.head().to_string(index=False))
 
-print("\nEV scenario saved to:", scenario_file)
-print("\nFirst five EVs:")
-print(scenario.head().to_string(index=False))
+    # The solar profile is generated independently by create_solar_profile.py.
+    ev, solar = load_inputs(cfg.DEFAULT_SCENARIO, cfg.DEFAULT_SOLAR)
 
+    schedules = all_baselines(ev, solar)
+    rows = [metrics_row(s, ev, solar, name) for name, s in schedules.items()]
 
-def run_uncontrolled():
-    """Each EV starts at arrival and charges at maximum power."""
-    schedule = np.zeros((N_EV, n_slots))
-
-    for i in range(N_EV):
-        remaining = required_energy[i]
-
-        for t in range(arrival_slot[i], departure_slot[i]):
-            if remaining <= 0:
-                break
-
-            p = min(max_power[i], remaining / STEP_HOURS)
-            schedule[i, t] = p
-            remaining -= p * STEP_HOURS
-
-    return schedule
-
-
-
-def run_fcfs():
-    """
-    FCFS priority baseline:
-    - At most 20 EVs are selected in each time slot.
-    - Earlier arrivals get priority.
-    - The 100 kW grid limit is enforced.
-    - Finished or departed EVs are no longer selected.
-    """
-    schedule = np.zeros((N_EV, n_slots))
-    order = np.argsort(arrival_slot)
-
-    for t in range(n_slots):
-        eligible = []
-
-        # Find EVs that have arrived, have not departed,
-        # and still need energy.
-        for i in order:
-            if arrival_slot[i] <= t < departure_slot[i]:
-                delivered = schedule[i, :t].sum() * STEP_HOURS
-                remaining = required_energy[i] - delivered
-
-                if remaining > 1e-9:
-                    eligible.append(i)
-
-        # Select the earliest-arriving EVs first.
-        selected = eligible[:N_CHARGERS]
-
-        remaining_grid_kw = MAX_GRID_KW
-
-        for i in selected:
-            delivered = schedule[i, :t].sum() * STEP_HOURS
-            remaining_energy = required_energy[i] - delivered
-
-            power_now = min(
-                max_power[i],
-                remaining_energy / STEP_HOURS,
-                remaining_grid_kw
-            )
-
-            if power_now > 0:
-                schedule[i, t] = power_now
-                remaining_grid_kw -= power_now
-
-            if remaining_grid_kw <= 1e-9:
-                break
-
-    return schedule
-
-
-
-
-def evaluate(name, schedule):
-    metrics = evaluate_schedule(
-        schedule=schedule,
-        required_energy_kwh=required_energy,
-        step_hours=STEP_HOURS,
-        max_grid_kw=MAX_GRID_KW,
-        max_chargers=N_CHARGERS,
-        max_power_kw=max_power,
-        arrival_slot=arrival_slot,
-        departure_slot=departure_slot,
+    save_schedule_csv(
+        cfg.RESULTS_DIR / "uncontrolled_schedule.csv",
+        schedules["Uncontrolled (infeasible reference)"], ev,
+    )
+    save_schedule_csv(
+        cfg.RESULTS_DIR / "fcfs_schedule.csv",
+        schedules["FCFS (chronological)"], ev,
+    )
+    save_load_profile_plot(
+        cfg.RESULTS_DIR / "baseline_load_profiles.png",
+        schedules["FCFS (chronological)"], solar,
+        "Baseline FCFS load profile",
     )
 
-    metrics["method"] = name
-    metrics["max_grid_limit_kw"] = MAX_GRID_KW
+    table = pd.DataFrame(rows)[RESULT_COLUMNS]
+    table.to_csv(cfg.RESULTS_DIR / "baseline_metrics.csv", index=False)
 
-    grid_load = schedule.sum(axis=0)
-    return metrics, grid_load
-
-
-
-uncontrolled = run_uncontrolled()
-fcfs = run_fcfs()
-
-metrics_u, load_u = evaluate("Uncontrolled", uncontrolled)
-metrics_f, load_f = evaluate("FCFS", fcfs)
-
-# Save both schedules so their constraints can be audited directly.
-slot_columns = [f"slot_{t}" for t in range(n_slots)]
-
-uncontrolled_df = pd.DataFrame(
-    uncontrolled,
-    columns=slot_columns
-)
-uncontrolled_df.insert(0, "ev_id", scenario["ev_id"].to_numpy())
-uncontrolled_path = RESULTS_DIR / "uncontrolled_schedule.csv"
-uncontrolled_df.to_csv(uncontrolled_path, index=False)
-
-fcfs_df = pd.DataFrame(
-    fcfs,
-    columns=slot_columns
-)
-fcfs_df.insert(0, "ev_id", scenario["ev_id"].to_numpy())
-fcfs_path = RESULTS_DIR / "fcfs_schedule.csv"
-fcfs_df.to_csv(fcfs_path, index=False)
-
-print("\nBaseline schedules saved:")
-print(uncontrolled_path)
-print(fcfs_path)
+    print("\nBASELINE COMPARISON (shared objective, repair and evaluator)")
+    print(table.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+    print(f"\nMetrics saved to: {cfg.RESULTS_DIR / 'baseline_metrics.csv'}")
+    print("Note: 'Uncontrolled' is deliberately infeasible and is a reference only.")
 
 
-print("\nFCFS diagnostic:")
-print("Total required energy (kWh):", round(required_energy.sum(), 2))
-print("Total FCFS energy (kWh):", round(fcfs.sum() * STEP_HOURS, 2))
-print("Maximum FCFS load (kW):", round(fcfs.sum(axis=0).max(), 2))
-print("Time slots with zero FCFS load:", int((fcfs.sum(axis=0) == 0).sum()))
-print("Time slots with positive FCFS load:", int((fcfs.sum(axis=0) > 0).sum()))
-print("Maximum individual EV power (kW):", round(fcfs.max(), 2))
-
-results = pd.DataFrame([metrics_u, metrics_f])
-results.to_csv(RESULTS_DIR / "baseline_metrics.csv", index=False)
-
-print("\nBaseline comparison:")
-print(results.to_string(index=False))
-
-# Plot aggregate load profiles
-plt.figure(figsize=(11, 5))
-plt.plot(slot_hours, load_u, label="Uncontrolled")
-plt.plot(slot_hours, load_f, label="FCFS")
-plt.axhline(MAX_GRID_KW, linestyle="--", label="Grid capacity")
-plt.xlabel("Hour of day")
-plt.ylabel("Aggregate charging power (kW)")
-plt.title("Apartment EV Charging: Baseline Load Profiles")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-
-plot_file = RESULTS_DIR / "baseline_load_profiles.png"
-plt.savefig(plot_file, dpi=150)
-plt.close()
-
-print("\nLoad profile saved to:", plot_file)
-print("Metrics saved to:", RESULTS_DIR / "baseline_metrics.csv")
+if __name__ == "__main__":
+    main()
