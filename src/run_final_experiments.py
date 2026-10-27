@@ -6,6 +6,11 @@ The single command that regenerates every headline result.
 Produces, all through one evaluator and one repair routine:
 
 * ``results/final_unified/comparison_metrics.csv`` - every method side by side
+  (volume metrics, audit/provenance)
+* ``results/final_unified/equal_service_comparison.csv`` - the same methods
+  judged at equal service: cost and peak per delivered kWh, service attained,
+  and Pareto dominance flags
+* ``results/final_unified/equal_service_frontier.png`` - service vs intensity
 * ``results/final_unified/schedules.npz``         - the schedules themselves
 * ``results/final_unified/run_manifest.csv``      - mode, settings, seeds, input hashes
 * ``results/ga_*`` / ``results/pso_*``            - per-algorithm schedule,
@@ -40,11 +45,17 @@ from artifacts import (
     metrics_row,
     save_convergence_csv,
     save_convergence_plot,
+    save_equal_service_plot,
     save_load_profile_plot,
     save_metrics_csv,
     save_schedule_csv,
 )
 from baselines import all_baselines
+from equal_service import (
+    equal_service_table,
+    frontier_rows,
+    service_accounting,
+)
 from multiobjective_core import load_inputs
 from multiobjective_optimizers import optimize_ga, optimize_pso
 from run_rolling_horizon import optimize_rolling
@@ -315,22 +326,66 @@ def main():
     table.to_csv(out_dir / "comparison_metrics.csv", index=False)
     np.savez_compressed(out_dir / "schedules.npz", **schedules)
 
+    # The volume table above is the audit record; this is the comparison. Total
+    # cost and total peak are volume metrics, so a method that delivers less
+    # energy always looks cheaper. Judging at equal service removes that effect.
+    service = equal_service_table(schedules, ev, solar)
+    service.to_csv(out_dir / "equal_service_comparison.csv", index=False)
+    save_equal_service_plot(out_dir / "equal_service_frontier.png", service)
+
     pd.DataFrame(baseline_rows)[RESULT_COLUMNS].to_csv(
         cfg.RESULTS_DIR / "baseline_metrics.csv", index=False
     )
 
     manifest_path = write_run_manifest(out_dir, ev, solar, conf, args)
 
-    print("\n" + "=" * 100)
-    print("COMPARISON (every row uses the same objective, repair and evaluator)")
-    print("=" * 100)
+    accounting = service_accounting(ev, len(solar))
+
+    print("\n" + "=" * 110)
+    print("VOLUME METRICS (audit table - total cost and total peak are NOT comparable across methods)")
+    print("=" * 110)
     print(table.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+
+    print("\n" + "=" * 118)
+    print("EQUAL-SERVICE COMPARISON (cost and peak per delivered kWh)")
+    print("=" * 118)
+    print(
+        f"Attainable service: {accounting['attainable_energy_kwh']:.1f} of "
+        f"{accounting['required_energy_kwh']:.1f} kWh requested "
+        f"({accounting['infeasible_evs']} EVs cannot be fully charged in their own "
+        f"window, {accounting['infeasible_energy_kwh']:.1f} kWh)"
+    )
+    shown = [
+        "method",
+        "service_delivered_kwh",
+        "service_pct_of_attainable",
+        "fully_charged_evs",
+        "unmet_congestion_kwh",
+        "cost_per_delivered_kwh",
+        "peak_per_delivered_kwh",
+        "peak_to_average_ratio",
+        "pareto_status",
+    ]
+    print(service[shown].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+
+    print("\nNon-dominated methods, cheapest service first:")
+    for _, row in frontier_rows(service).iterrows():
+        print(
+            f"  {row['method']:<34} service {row['service_pct_of_attainable']:6.2f}% "
+            f" cost/kWh {row['cost_per_delivered_kwh']:.4f} "
+            f" peak/kWh {row['peak_per_delivered_kwh']:.5f}"
+        )
+    for _, row in service[service["pareto_status"] == "dominated"].iterrows():
+        print(f"  {row['method']:<34} dominated by {row['dominated_by']}")
+
     print(f"\nSaved: {out_dir / 'comparison_metrics.csv'}")
+    print(f"Saved: {out_dir / 'equal_service_comparison.csv'}")
+    print(f"Saved: {out_dir / 'equal_service_frontier.png'}")
     print(f"Saved: {out_dir / 'schedules.npz'}")
     print(f"Saved: {manifest_path}")
     print("Note: 'Uncontrolled' is deliberately infeasible and is a reference only.")
-    print("Note: total cost and peak are volume metrics - read them alongside "
-          "delivered energy or cost_per_delivered_kwh (see docs/TIER0_CHANGES.md).")
+    print("Note: read the volume table for provenance and the equal-service table "
+          "to compare methods (docs/TIER1_CHANGES.md).")
 
     if args.multi_seed:
         run_multi_seed(ev, solar, out_dir, args.quick)

@@ -187,6 +187,57 @@ def save_load_profile_plot(path, schedule, solar_kw, title, grid_limit=cfg.MAX_G
     return path
 
 
+def save_equal_service_plot(path, frame, title="Equal-service comparison"):
+    """
+    Plot cost and peak per delivered kWh against service attained.
+
+    This is the picture the equal-service table describes: x is how much of the
+    scenario's attainable energy a method delivered, y is what one delivered kWh
+    cost it (left) and the peak demand it needed to achieve that (right).
+    Frontier methods are filled, dominated ones hollow, and the deliberately
+    infeasible reference is not drawn at all - it would sit far off-scale.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    feasible = frame[frame["feasible"]].reset_index(drop=True)
+    dominated = feasible[feasible["pareto_status"] == "dominated"]
+    frontier = feasible[feasible["pareto_status"] == "frontier"]
+
+    panels = (
+        ("cost_per_delivered_kwh", "Tariff cost per delivered kWh (units/kWh)"),
+        ("peak_per_delivered_kwh", "Peak EV load per delivered kWh (kW/kWh)"),
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    for ax, (column, ylabel) in zip(axes, panels):
+        ax.scatter(
+            dominated["service_pct_of_attainable"], dominated[column],
+            s=55, facecolors="none", edgecolors="tab:gray",
+            label="dominated",
+        )
+        ax.scatter(
+            frontier["service_pct_of_attainable"], frontier[column],
+            s=70, color="tab:blue", label="Pareto frontier",
+        )
+        for _, row in feasible.iterrows():
+            ax.annotate(
+                row["method"],
+                (row["service_pct_of_attainable"], row[column]),
+                fontsize=7, xytext=(4, 3), textcoords="offset points",
+            )
+        ax.set_xlabel("Service attained (% of attainable energy)")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+
+    axes[0].legend(fontsize=8, loc="best")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
+
+
 def save_metrics_csv(path, metrics, method):
     """Write a single row of metrics for one method."""
     path = Path(path)
