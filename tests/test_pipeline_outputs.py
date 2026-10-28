@@ -18,7 +18,11 @@ import pytest
 import config as cfg
 from artifacts import RESULT_COLUMNS, load_schedule_csv, metrics_row
 from multiobjective_core import constraint_report
-from run_final_experiments import count_ga_evaluations, file_digest
+from run_final_experiments import (
+    count_ga_evaluations,
+    count_pso_evaluations,
+    file_digest,
+)
 
 UNIFIED = cfg.RESULTS_DIR / "final_unified"
 COMPARISON = UNIFIED / "comparison_metrics.csv"
@@ -86,25 +90,26 @@ def test_feasible_rows_respect_the_grid_limit(comparison):
     assert (feasible["peak_ev_load_kw"] <= cfg.MAX_GRID_KW + 1e-6).all()
 
 
-def test_no_method_approaches_the_grid_limit(comparison):
+def test_no_method_exceeds_the_grid_limit(comparison):
     """
-    The 125 kW cap is never near-binding: peak EV load sits around 95-99 kW.
+    Every feasible schedule stays at or below the 125 kW cap.
 
-    Peak is set by 20 ports times the fleet's average power, not by the grid, so
-    the peak-demand objective cannot buy anything by throttling below the cap.
-    See ``test_grid_limit_is_not_the_binding_constraint`` in test_scenario.py.
+    Tier 0 observed that no method came within 25% of the cap, because ports, not
+    the grid, were the binding constraint. Tier 2's optimizers deliberately push
+    the grid towards its limit (that is where the extra energy is), so the
+    invariant worth asserting is the constraint itself, not a slack margin.
     """
     feasible = comparison[comparison["feasible"]]
-    assert feasible["peak_ev_load_kw"].max() <= 0.85 * cfg.MAX_GRID_KW
+    assert feasible["peak_ev_load_kw"].max() <= cfg.MAX_GRID_KW + 1e-6
 
 
-def test_demand_is_structurally_underserved(comparison):
+def test_no_method_serves_every_request(comparison):
     """
-    No method gets close to complete service, and none is near-zero either.
+    Complete service is impossible, so every method leaves something on the road.
 
-    Two EVs cannot be charged at all (see test_scenario.py) and all 100 compete
-    for 20 ports each evening, so every method delivers roughly 64-75% of the
-    requested energy. This is the context required to read the cost column: a
+    Two EVs cannot be charged at all (see test_scenario.py) and the 20 ports are
+    the binding constraint, so the ceiling is well below 100% even for the MILP
+    reference (~85%). This is the context required to read the cost column: a
     method that delivers less energy will always look cheaper.
     """
     feasible = comparison[comparison["feasible"]]
@@ -112,26 +117,51 @@ def test_demand_is_structurally_underserved(comparison):
     assert (feasible["demand_met_pct"] > 60.0).all()
 
 
-def test_methods_all_land_within_a_narrow_band(comparison):
+def test_the_optimizers_beat_every_conventional_policy(comparison):
     """
-    Delivered energy spans only ~11 percentage points across every method.
+    Tier 2's headline claim, asserted on the artifact rather than in prose.
 
-    This is the single most important caveat on the headline comparison: the
-    scenario is so congested that the achievable spread is small, so an
-    advantage in delivered energy alone is weak evidence of a better scheduler.
+    Tier 0/1 could only show that the optimizers lost to EDF. With a genome that
+    controls the allocation, a 10^4-evaluation budget and a memetic polish, both
+    optimizers must deliver more energy than any conventional policy on the same
+    scenario, through the same evaluator.
+    """
+    by_method = comparison.set_index("method")["delivered_energy_kwh"]
+    conventional = comparison[
+        comparison["method"].str.startswith(("FCFS", "EDF")) & comparison["feasible"]
+    ]["delivered_energy_kwh"]
+
+    for name in ("GA", "PSO"):
+        assert by_method[name] > conventional.max(), name
+
+
+def test_a_full_run_spans_a_wide_range_of_service(comparison):
+    """
+    The methods no longer cluster in a narrow band.
+
+    Tier 0/1 saw 11 percentage points of spread and correctly warned that an
+    advantage in delivered energy alone was weak evidence. Tier 2 widens the
+    spread to over 20 points, which is itself the result: the old methods were
+    not near a structural ceiling, they were leaving energy behind.
     """
     feasible = comparison[comparison["feasible"]]
     spread = feasible["demand_met_pct"].max() - feasible["demand_met_pct"].min()
-    assert spread < 15.0
+    assert spread > 15.0
 
 
 def test_ga_and_pso_used_the_configured_full_budget(comparison):
     """Pins the provenance: these evaluation counts only come from the full settings."""
     by_method = comparison.set_index("method")["evaluations"]
     assert by_method["GA"] == count_ga_evaluations(
-        cfg.GA_POPULATION_SIZE, cfg.GA_GENERATIONS
+        cfg.GA_POPULATION_SIZE,
+        cfg.GA_GENERATIONS,
+        polish_evaluations=cfg.GA_POLISH_EVALUATIONS,
     )
-    assert by_method["PSO"] == cfg.PSO_PARTICLES * (1 + cfg.PSO_ITERATIONS)
+    assert by_method["PSO"] == count_pso_evaluations(
+        cfg.PSO_PARTICLES,
+        cfg.PSO_ITERATIONS,
+        polish_evaluations=cfg.PSO_POLISH_EVALUATIONS,
+    )
 
 
 def test_baselines_perform_no_evaluations(comparison):

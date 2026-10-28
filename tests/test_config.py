@@ -28,14 +28,26 @@ def test_paths_point_inside_the_project():
         assert str(path).startswith(str(cfg.PROJECT_DIR))
 
 
-def test_full_run_budget_is_large_enough_to_be_meaningful():
+def test_full_run_budget_is_of_order_ten_thousand_evaluations():
     """
-    Guards the documented Tier 1 finding rather than the code.
+    Guards the Tier 2 fix for Tier 0 item 11.
 
-    The full-run GA performs 560 evaluations. Tier 2 argues that a 14,400-gene
-    search needs 10^4-10^5 of them, so this test does not assert a good budget -
-    it only refuses to let the budget silently drop to a smoke-test size.
+    Tier 0/1 searched with 560 evaluations and Tier 0 said the budget needed
+    10^4-10^5. Both optimizers now report an exact count in that range, memetic
+    polish included, so a silent return to a smoke-test budget fails here.
     """
-    from run_final_experiments import count_ga_evaluations
+    from run_final_experiments import count_ga_evaluations, count_pso_evaluations
 
-    assert count_ga_evaluations(cfg.GA_POPULATION_SIZE, cfg.GA_GENERATIONS) == 560
+    ga = count_ga_evaluations(
+        cfg.GA_POPULATION_SIZE,
+        cfg.GA_GENERATIONS,
+        polish_evaluations=cfg.GA_POLISH_EVALUATIONS,
+    )
+    pso = count_pso_evaluations(
+        cfg.PSO_PARTICLES,
+        cfg.PSO_ITERATIONS,
+        polish_evaluations=cfg.PSO_POLISH_EVALUATIONS,
+    )
+    assert ga >= 10_000
+    assert pso >= 10_000
+    assert ga <= 100_000 and pso <= 100_000

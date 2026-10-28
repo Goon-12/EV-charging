@@ -74,14 +74,32 @@ SOLAR_PEAK_KW = 50.0
 # --------------------------------------------------------------------------
 # Stochastic optimizers
 # --------------------------------------------------------------------------
+# Tier 2 budgets. The genome is 4 genes per EV (400 for this scenario), so the
+# search needs 10^4 evaluations rather than the 560 of Tier 0/1:
+#
+#   GA  : 40 + 240 * (40 - 4)  = 8,680 + 4,000 polish = 12,680
+#   PSO : 30 * (1 + 300)       = 9,030 + 4,000 polish = 13,030
+#
+# Both counts are asserted against the optimizers' real behaviour in
+# tests/test_optimizers.py, so the reported budget cannot silently drift.
 GA_SEED = 46
 PSO_SEED = 42
 ROLLING_SEED = 46
 
-GA_POPULATION_SIZE = 20
-GA_GENERATIONS = 30
-PSO_PARTICLES = 12
-PSO_ITERATIONS = 15
+GA_POPULATION_SIZE = 40
+GA_GENERATIONS = 240
+# Mutation and elitism were tuned against the full budget, not guessed: a 400-gene
+# genome needs a *low* per-gene mutation rate. At 0.08 (the Tier 0/1 value) some
+# 32 genes of every child are re-drawn, which destroys the structure that makes a
+# genome good - that run delivered 1,165 kWh against 1,240 kWh at 0.02 with the
+# same budget.
+GA_ELITE_COUNT = 4
+GA_MUTATION_RATE = 0.02
+GA_POLISH_EVALUATIONS = 4_000
+
+PSO_PARTICLES = 30
+PSO_ITERATIONS = 300
+PSO_POLISH_EVALUATIONS = 4_000
 
 ROLLING_WINDOW_SLOTS = 24
 ROLLING_GA_POPULATION_SIZE = 8
@@ -97,13 +115,20 @@ SEEDS = (42, 43, 44, 45, 46)
 # J = w_unmet * unmet_n + w_peak * peak_n + w_cost * cost_n
 #     + w_battery * battery_n - w_solar * solar_n
 #
-# NOTE (Tier 0): this remains a throughput-dominated weighting. Tier 1
-# re-normalises the cost and peak terms and re-tunes these weights so that
-# cost and peak are not drowned out by the unmet-energy term.
+# Tier 2 (was Tier 0's 0.80 / 0.07 / 0.06 / 0.02 / 0.05): the cost term is now
+# cost per delivered kWh scaled by the peak tariff, so it is no longer pinned
+# into 0.47-1.0 by the size of the schedule, and it carries a weight that the
+# optimizer can actually act on. Service still leads, because a schedule that
+# serves less is not a schedule.
+#
+# The battery and solar terms stay small and are effectively inert in this
+# scenario (battery stress is ~0.98 for every method, and only 43.8 of 566.5 kWh
+# of PV coincides with a connected EV). They are kept for continuity with the
+# model description, not because they discriminate between methods.
 OBJECTIVE_WEIGHTS = {
-    "unmet": 0.80,
-    "peak": 0.07,
-    "cost": 0.06,
+    "unmet": 0.55,
+    "peak": 0.08,
+    "cost": 0.30,
     "battery": 0.02,
     "solar": 0.05,
 }
@@ -114,3 +139,17 @@ INFEASIBILITY_PENALTY = 10.0
 
 # Tolerance (kWh) below which an EV counts as fully charged.
 FULLY_CHARGED_TOLERANCE_KWH = 1e-3
+
+# --------------------------------------------------------------------------
+# Reference optima (src/reference_optimum.py)
+# --------------------------------------------------------------------------
+# The MILP that bounds what any scheduler can achieve. It is solved once per
+# artifact set, not per experiment, so the time limit is generous but finite:
+# a reported optimum is always the best feasible solution *found within the
+# limit*, together with the solver's own MIP gap.
+REFERENCE_TIME_LIMIT_S = 90.0
+REFERENCE_MIP_GAP = 0.01
+# Service levels (kWh delivered) at which the minimum-cost reference is solved.
+# Levels above the max-service optimum are skipped at run time, so this is an
+# upper envelope rather than a set of hard requests.
+REFERENCE_SERVICE_LEVELS_KWH = (960.0, 1080.0, 1140.0, 1200.0, 1260.0)

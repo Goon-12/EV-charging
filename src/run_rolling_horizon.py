@@ -71,10 +71,14 @@ def optimize_rolling(
         local_solar = np.asarray(solar_kw[t:end], dtype=float)
 
         # The window's first column is global slot t, so pass the offsets through.
+        # ``polish_evaluations=0``: the memetic pass is worth its cost once per
+        # run, not 144 times per horizon, so the controller keeps the plain
+        # evolutionary search inside each window.
         window_kwargs = dict(
             seed=seed + t,
             slot_offset=t,
             horizon_slots=n_slots - t,
+            polish_evaluations=0,
         )
         if method.lower() == "pso":
             local_schedule, _ = optimize_pso(

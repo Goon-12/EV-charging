@@ -318,15 +318,29 @@ def objective(schedule, ev, solar_kw, weights=None):
     ~10^4 times per experiment, so it must stay silent: it printed three
     diagnostic lines per call before Tier 0. Use ``evaluate_schedule`` if you
     need those numbers.
+
+    Tier 2 note on the cost term: it used to be ``cost / (required * TARIFF_PEAK)``,
+    which is a *volume* ratio - it moves with how much energy the schedule
+    delivers, not with how well it priced that energy, and it compressed every
+    real schedule into 0.47-1.0. Tier 1 showed the consequence: the objective
+    ranked a method second that was strictly dominated on service, cost per kWh
+    and peak per kWh. Cost is now an intensity (cost per delivered kWh, scaled by
+    the peak tariff), so the weight means what it says and the term is
+    independent of delivered volume up to the solar term. Peak stays a volume
+    metric by necessity (a peak is a peak), which is why it keeps a small weight.
     """
     w = cfg.OBJECTIVE_WEIGHTS if weights is None else weights
     m = evaluate_schedule(schedule, ev, solar_kw)
     req = max(m["required_energy_kwh"], 1e-9)
-    cost_ref = max(req * cfg.TARIFF_PEAK, 1.0)
 
     unmet_n = m["unmet_energy_kwh"] / req
     peak_n = m["peak_grid_import_kw"] / cfg.MAX_GRID_KW
-    cost_n = min(m["grid_cost_units"] / cost_ref, 1.0)
+    delivered = m["delivered_energy_kwh"]
+    cost_n = (
+        min(m["grid_cost_units"] / delivered / cfg.TARIFF_PEAK, 1.0)
+        if delivered > 1e-9
+        else 0.0
+    )
     battery_n = m["battery_stress_proxy"]
     solar_n = m["solar_used_kwh"] / max(m["solar_available_kwh"], 1e-9)
 
