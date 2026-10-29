@@ -119,7 +119,7 @@ def main():
         ("Feasibility-first", "feasibility_baseline_schedule.csv"),
         ("Battery-aware GA v3", "ga_battery_aware_v3_schedule.csv"),
         ("Solar-aware baseline", "solar_aware_schedule.csv"),
-        ("Cost-aware GA", "ga_cost_best_schedule_latest.csv"),
+        ("Cost-aware GA", "ga_cost_best_schedule.csv"),
     ]
     for name, filename in candidates:
         P = load_schedule(filename)

@@ -30,7 +30,7 @@ schedule_files = {
     "Original GA": "ga_best_schedule.csv",
     "PSO": "pso_best_schedule.csv",
     "Feasibility-first": "feasibility_baseline_schedule.csv",
-    "Cost-aware GA": "ga_cost_best_schedule_latest.csv",
+    "Cost-aware GA": "ga_cost_best_schedule.csv",
     "Solar-aware": "solar_aware_schedule.csv",
 }
 

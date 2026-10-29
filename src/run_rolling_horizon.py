@@ -1,36 +1,111 @@
-"""Receding-horizon EV charging controller. Executes only the first 15-min slot, then replans."""
+"""
+Receding-horizon EV charging controller.
+
+At every slot the controller plans over a look-ahead window, executes only the
+first slot of that plan, observes the result, and replans. Only the current and
+future slots are ever modified; already-executed decisions are frozen.
+
+Tier 0 bug fixes
+----------------
+1. **Tariff clock.** The look-ahead window is a *slice* of the horizon, but the
+   tariff used to be rebuilt with ``tariff_vector(width)``, i.e. every window
+   believed it started at midnight and therefore applied the 4.0 off-peak rate.
+   The controller was blind to the evening peak. Windows now carry their
+   absolute ``slot_offset``.
+2. **Urgency scale.** The deadline-urgency term inside the repair heuristic is
+   normalised by the number of slots in the priority matrix. Inside a 24-slot
+   window that compressed urgency towards zero for every EV departing after the
+   window, so the controller deferred far-deadline EVs instead of charging them
+   early. ``horizon_slots`` now reports the slots actually left in the
+   simulation.
+"""
+from __future__ import annotations
+
 import numpy as np
-from multiobjective_core import STEP_HOURS, repair_schedule
+
+import config as cfg
+from multiobjective_core import constraint_report
 from multiobjective_optimizers import optimize_ga, optimize_pso
 
-def optimize_rolling(ev, solar_kw, method="ga", window_slots=24, seed=46,
-                     population_size=8, generations=5, particles=6, iterations=4):
+
+def optimize_rolling(
+    ev,
+    solar_kw,
+    method="ga",
+    window_slots=cfg.ROLLING_WINDOW_SLOTS,
+    seed=cfg.ROLLING_SEED,
+    population_size=cfg.ROLLING_GA_POPULATION_SIZE,
+    generations=cfg.ROLLING_GA_GENERATIONS,
+    particles=cfg.ROLLING_PSO_PARTICLES,
+    iterations=cfg.ROLLING_PSO_ITERATIONS,
+    check_feasibility=True,
+):
+    """
+    Return the executed charging schedule for the whole horizon.
+
+    Each replanning step runs a deliberately small optimization so that the
+    total runtime stays manageable; the controller, not the optimizer, is what
+    is being evaluated here.
+    """
     n_ev, n_slots = len(ev), len(solar_kw)
-    arr=ev["arrival_slot"].to_numpy(int)
-    dep=ev["departure_slot"].to_numpy(int)
-    original_req=ev["required_energy_kwh"].to_numpy(float)
-    remaining=original_req.copy()
-    pmax=ev["max_power_kw"].to_numpy(float)
-    final=np.zeros((n_ev,n_slots),dtype=float)
+    arr = ev["arrival_slot"].to_numpy(int)
+    dep = ev["departure_slot"].to_numpy(int)
+    original_req = ev["required_energy_kwh"].to_numpy(float)
+
+    remaining = original_req.copy()
+    final = np.zeros((n_ev, n_slots), dtype=float)
+
     for t in range(n_slots):
-        end=min(n_slots,t+window_slots)
-        width=end-t
-        if width <= 0: break
-        local=ev.copy()
-        local["arrival_slot"]=np.clip(arr-t,0,width)
-        local["departure_slot"]=np.clip(dep-t,0,width)
+        end = min(n_slots, t + window_slots)
+        width = end - t
+        if width <= 0:
+            break
+
+        local = ev.copy()
+        local["arrival_slot"] = np.clip(arr - t, 0, width)
+        local["departure_slot"] = np.clip(dep - t, 0, width)
         # EVs whose departure has passed cannot receive any more energy.
-        local_req=remaining.copy()
-        local_req[dep <= t]=0.0
-        local["required_energy_kwh"]=local_req
-        local_solar=np.asarray(solar_kw[t:end],float)
-        # Small optimization per replanning step keeps runtime manageable.
-        if method.lower()=="pso":
-            local_schedule,_=optimize_pso(local,local_solar,particles=particles,iterations=iterations,seed=seed+t)
+        local_requirement = remaining.copy()
+        local_requirement[dep <= t] = 0.0
+        local["required_energy_kwh"] = local_requirement
+        local_solar = np.asarray(solar_kw[t:end], dtype=float)
+
+        # The window's first column is global slot t, so pass the offsets through.
+        # ``polish_evaluations=0``: the memetic pass is worth its cost once per
+        # run, not 144 times per horizon, so the controller keeps the plain
+        # evolutionary search inside each window.
+        window_kwargs = dict(
+            seed=seed + t,
+            slot_offset=t,
+            horizon_slots=n_slots - t,
+            polish_evaluations=0,
+        )
+        if method.lower() == "pso":
+            local_schedule, _ = optimize_pso(
+                local, local_solar,
+                particles=particles, iterations=iterations, **window_kwargs,
+            )
+        elif method.lower() == "ga":
+            local_schedule, _ = optimize_ga(
+                local, local_solar,
+                population_size=population_size, generations=generations,
+                **window_kwargs,
+            )
         else:
-            local_schedule,_=optimize_ga(local,local_solar,population_size=population_size,
-                                         generations=generations,seed=seed+t)
-        first=local_schedule[:,0]
-        final[:,t]=first
-        remaining=np.maximum(remaining-first*STEP_HOURS,0.0)
+            raise ValueError(
+                f"Unknown method: {method!r} (expected 'ga' or 'pso')"
+            )
+
+        executed = local_schedule[:, 0]
+        final[:, t] = executed
+        remaining = np.maximum(remaining - executed * cfg.STEP_HOURS, 0.0)
+
+    if check_feasibility:
+        report = constraint_report(final, ev, solar_kw)
+        if report["total"] != 0:
+            raise ValueError(
+                "Rolling-horizon controller produced an infeasible trajectory. "
+                f"This indicates a controller bug: {report}"
+            )
+
     return final

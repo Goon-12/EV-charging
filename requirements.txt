@@ -1,0 +1,22 @@
+# Runtime dependencies for the EV charging optimization prototype.
+# Versions pinned to the versions the results were produced with.
+#
+# Install:
+#   python -m venv .venv
+#   .venv/Scripts/python -m pip install -r requirements.txt      (Windows)
+#   .venv/bin/python -m pip install -r requirements.txt          (Linux/macOS)
+#
+# Requires Python >= 3.10 (tested on 3.11).
+
+numpy==2.4.6
+pandas==3.0.6
+matplotlib==3.11.2
+
+# MILP reference optima (src/reference_optimum.py). Only scipy.optimize.milp is
+# used, which ships HiGHS; no separate solver install or licence is needed.
+# Tier 2: without this the pipeline still runs, it just cannot report the gap to
+# the best schedule known.
+scipy==1.16.2
+
+# Test runner for the tests/ suite (see docs/TIER0_CHANGES.md).
+pytest==8.4.2
