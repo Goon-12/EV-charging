@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EV charging lab — Tier 2 results</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">EV</div>
+      <div class="brand-text">
+        <h1>Charging scheduler lab</h1>
+        <p id="brand-sub">Loading the scenario…</p>
+      </div>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections">
+      <button class="tab is-active" data-tab="overview" role="tab" aria-selected="true">Results</button>
+      <button class="tab" data-tab="profiles" role="tab" aria-selected="false">Load profiles</button>
+      <button class="tab" data-tab="schedule" role="tab" aria-selected="false">Schedule</button>
+      <button class="tab" data-tab="live" role="tab" aria-selected="false">Live run</button>
+      <button class="tab" data-tab="evidence" role="tab" aria-selected="false">Method &amp; evidence</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel is-active" id="panel-overview" role="tabpanel">
+      <div class="hero card">
+        <div class="hero-copy">
+          <p class="eyebrow">Tier 2 · certified benchmarking</p>
+          <h2>Every EV gets a port. The question is which one, and when.</h2>
+          <p class="lede">
+            A 100-EV office scenario requests <strong id="hero-required">—</strong> kWh
+            over 36 hours, but the site has <strong>20 ports</strong> and a
+            <strong>125 kW</strong> grid connection. A scheduler's whole job is the order
+            in which EVs take a port. Conventional policies decide that order with one
+            fixed rule; the optimizers search for it.
+          </p>
+          <div class="hero-facts" id="hero-facts"></div>
+        </div>
+        <div class="port-gauge" aria-label="Port-hours demanded versus supplied">
+          <p class="mini-label">Port-hours demanded vs supplied</p>
+          <div id="port-gauge"></div>
+        </div>
+      </div>
+
+      <div class="kpis" id="kpis"></div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Service delivered against the certified ceiling</h2>
+          <p>
+            Every bar is delivered energy, measured by one evaluator. The dashed line is
+            the best conventional policy; the dotted line is the best schedule the MILP
+            could certify. The optimizers are climbing toward the second line, not
+            fighting each other.
+          </p>
+        </div>
+        <div id="chart-service" class="chart"></div>
+        <div class="legend" id="service-legend"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>What each delivered kWh cost</h2>
+            <p>
+              Right is more service; down is cheaper energy. The dark dashed line is the
+              cheapest schedule the MILP found at each service level — every method above
+              it is paying for something.
+            </p>
+          </div>
+          <div id="chart-scatter" class="chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>The trade-off, stated plainly</h2>
+            <p>
+              PSO delivers more energy and pays less per kWh than EDF. It also fully
+              charges far fewer EVs and holds a slightly higher peak. Both facts are in
+              the table.
+            </p>
+          </div>
+          <div id="tradeoff"></div>
+        </div>
+      </div>
+
+      <div class="callout" id="verdict"></div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel" id="panel-profiles" role="tabpanel" hidden>
+      <div class="card">
+        <div class="card-head row">
+          <div>
+            <h2>Load profiles</h2>
+            <p>
+              Site load for each method over the 36-hour horizon. The red band is the
+              evening tariff peak; the dashed red line is the 125 kW contract. What
+              separates the methods is how close they keep the site to its limit.
+            </p>
+          </div>
+          <div class="chips" id="profile-chips"></div>
+        </div>
+        <div id="chart-profiles" class="chart"></div>
+        <div class="legend" id="profile-legend"></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>What the profiles add up to</h2>
+            <p>Computed in the browser from the committed schedules.</p>
+          </div>
+          <div id="profile-stats"></div>
+        </div>
+        <div class="card prose">
+          <h2>Why the shapes differ</h2>
+          <p>
+            FCFS and EDF fill ports in the order EVs arrive or depart, so whenever 20
+            vehicles are connected they hold all 20 ports and charge — often before the
+            evening peak, and then leave the site idle later.
+          </p>
+          <p>
+            The optimizers choose which EV should hold a port in each slot, so they can
+            move work into cheaper or higher-headroom slots and keep the site busier for
+            longer at a lower peak. Ports, not energy, are the scarce resource: the
+            sessions need about 343 port-hours at rated power and the windows supply
+            about <span id="port-hours-inline">—</span>.
+          </p>
+          <p class="muted">
+            Solar is drawn as available, not as delivered. Only
+            <strong id="solar-note">—</strong> of the PV energy coincides with a
+            connected EV, which is why the solar term barely separates the methods.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel" id="panel-schedule" role="tabpanel" hidden>
+      <div class="card">
+        <div class="card-head row">
+          <div>
+            <h2>Schedule explorer</h2>
+            <p>
+              One row per EV, one column per 15-minute slot, colour = charging power.
+              Empty space is time the EV was connected but held no port — or was not
+              connected at all.
+            </p>
+          </div>
+          <label class="field inline">
+            <span>Method</span>
+            <select id="schedule-select"></select>
+          </label>
+        </div>
+        <div class="pills" id="schedule-pills"></div>
+        <div class="heat-wrap" id="heat-wrap">
+          <canvas id="schedule-canvas" aria-label="EV by time charging heatmap"></canvas>
+          <div class="heat-cursor" id="heat-cursor" hidden></div>
+        </div>
+        <div class="heat-axis" id="heat-axis"></div>
+        <div class="heat-legend">
+          <span class="mini-label">Power per EV</span>
+          <span class="ramp" aria-hidden="true"></span>
+          <span class="ramp-labels"><span>0 kW</span><span>4 kW</span><span>8 kW</span></span>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>Ports busy per slot</h2>
+            <p>How many of the 20 ports are occupied. Flat at 20 means the port limit, not demand, is binding.</p>
+          </div>
+          <canvas id="occupancy-canvas" class="occupancy-canvas"></canvas>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Least-served EVs</h2>
+            <p>The six sessions this schedule short-changes most, out of 100.</p>
+          </div>
+          <div id="worst-ev"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel" id="panel-live" role="tabpanel" hidden>
+      <div class="live-grid">
+        <form class="card controls" id="live-form">
+          <h2>Run it yourself</h2>
+          <p class="muted">
+            This calls the project's own GA and PSO with a reduced budget, then evaluates
+            every schedule with the same code that produced the committed tables.
+          </p>
+
+          <div class="presets" role="group" aria-label="Weight presets">
+            <button type="button" class="chip" data-preset="service">Service first</button>
+            <button type="button" class="chip is-on" data-preset="balanced">Balanced</button>
+            <button type="button" class="chip" data-preset="cost">Cost first</button>
+          </div>
+
+          <fieldset class="field">
+            <legend>Search budget</legend>
+            <div class="budget-options" id="budget-options"></div>
+          </fieldset>
+
+          <div class="field-row">
+            <label class="field">
+              <span>Random seed</span>
+              <input type="number" id="seed-input" value="46" min="0" max="4294967295" step="1">
+            </label>
+            <div class="field">
+              <span>Optimizers</span>
+              <div class="checks">
+                <label class="check"><input type="checkbox" id="algo-ga" checked> GA</label>
+                <label class="check"><input type="checkbox" id="algo-pso" checked> PSO</label>
+              </div>
+            </div>
+          </div>
+
+          <fieldset class="field">
+            <legend>Objective weights</legend>
+            <div class="slider" data-weight="unmet">
+              <label for="w-unmet">Unmet energy <output id="w-unmet-out">55%</output></label>
+              <input type="range" id="w-unmet" min="0" max="1" step="0.01" value="0.55">
+            </div>
+            <div class="slider" data-weight="cost">
+              <label for="w-cost">Tariff cost <output id="w-cost-out">30%</output></label>
+              <input type="range" id="w-cost" min="0" max="1" step="0.01" value="0.30">
+            </div>
+            <div class="slider" data-weight="peak">
+              <label for="w-peak">Peak demand <output id="w-peak-out">8%</output></label>
+              <input type="range" id="w-peak" min="0" max="1" step="0.01" value="0.08">
+            </div>
+            <p class="hint">
+              Weights are normalised to sum to 1. Battery stress (0.02) and solar reward
+              (0.05) are fixed, as in the committed run.
+            </p>
+          </fieldset>
+
+          <button type="submit" class="primary" id="run-button">Run live experiment</button>
+          <p class="hint" id="run-hint"></p>
+          <p class="status" id="live-status" aria-live="polite"></p>
+        </form>
+
+        <div class="card" id="live-output-card">
+          <div id="live-placeholder" class="empty">
+            <div class="empty-mark" aria-hidden="true">▶</div>
+            <h2>No live run yet</h2>
+            <p>
+              Press <strong>Run live experiment</strong>. A quick run takes a few
+              seconds; a deep run takes roughly twenty on an idle laptop. The committed
+              results use 12,680 and 13,030 evaluations, so a live run is a demonstration
+              of the mechanism, not a replacement for the reported numbers.
+            </p>
+          </div>
+          <div id="live-output" hidden>
+            <div class="headline-verdict" id="live-verdict"></div>
+            <div class="table-wrap" id="live-table"></div>
+            <h3 class="chart-title">Live load profiles</h3>
+            <div id="chart-live" class="chart"></div>
+            <div class="legend" id="live-legend"></div>
+            <h3 class="chart-title">Convergence inside the budget</h3>
+            <p class="muted small">Best objective value after each generation / iteration. Lower is better.</p>
+            <div id="chart-convergence" class="chart"></div>
+            <div class="legend" id="convergence-legend"></div>
+            <p class="hint">
+              Click any optimizer row in the table to inspect its schedule in the
+              Schedule tab.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------------------- -->
+    <section class="panel" id="panel-evidence" role="tabpanel" hidden>
+      <div class="grid-2">
+        <div class="card prose">
+          <h2>How the search works</h2>
+          <p>
+            Each EV carries four genes: a priority rank, how strongly it values urgency,
+            how strongly it avoids expensive hours, and the fraction of its rated power it
+            is willing to draw. GA and PSO both search that 400-gene vector, and a
+            slot-by-slot decoder turns it into a feasible schedule.
+          </p>
+          <p>
+            Feasibility is structural, not penalised: the decoder never exceeds a
+            connection window, a port count, a rated power or the grid cap. That is why
+            every committed method reports zero violations, and why the optimizers cannot
+            buy service by breaking a constraint.
+          </p>
+          <p>
+            Both optimizers are memetic: a fixed, exactly-counted budget of hill-climbing
+            moves polishes the best genome after the evolutionary phase. The evaluation
+            counts in the table are therefore measured, not estimated.
+          </p>
+        </div>
+        <div class="card prose">
+          <h2>How the result is certified</h2>
+          <p>
+            The scenario is also solved as a mixed-integer linear program. It gives two
+            things a metaheuristic cannot give itself: the maximum service any feasible
+            schedule can deliver, and the cheapest schedule at each service level.
+          </p>
+          <p>
+            The MILP is the referee, not the competitor. For 100 sessions it solves in
+            seconds, and that is exactly why it is useful here: it makes "97.0% of the
+            best schedule known" a measured denominator instead of a claim. At ten times
+            the sessions its port binaries grow with every feasible (EV, slot) pair while
+            the search cost stays linear in the budget.
+          </p>
+          <p class="muted">
+            Every reference row carries its solver status, MIP gap and the SHA-256 of the
+            inputs it was solved on. A row labelled <em>optimal</em> proved optimality.
+          </p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head row">
+          <div>
+            <h2>Reference optima</h2>
+            <p>The epsilon-constraint frontier and the service ceiling, as committed.</p>
+          </div>
+          <a class="link-btn" href="/artifacts/reference_optimum.csv" download>Download CSV</a>
+        </div>
+        <div class="table-wrap" id="reference-table"></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h2>Seed stability</h2>
+            <p>GA and PSO over seeds 42–46 at the full budget.</p>
+          </div>
+          <div class="table-wrap" id="seed-table"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>Provenance</h2>
+            <p>From <code>run_manifest.csv</code>.</p>
+          </div>
+          <dl class="manifest" id="manifest-list"></dl>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Reproduce this</h2>
+          <p>Everything on this page comes from these two commands, run from <code>EV-charging/</code>.</p>
+        </div>
+        <pre class="code"><code>.venv/Scripts/python src/run_final_experiments.py --multi-seed
+.venv/Scripts/python -m pytest tests -q</code></pre>
+        <p class="muted small" id="test-count"></p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Limitations worth saying out loud</h2>
+        </div>
+        <ul class="caveats">
+          <li>The tariff is synthetic and illustrative, not a real supplier's price.</li>
+          <li>Solar is a modelled profile; only a small fraction of it coincides with connected EVs.</li>
+          <li>Battery stress is a relative charging-rate proxy, not a degradation prediction.</li>
+          <li>PSO fully charges fewer EVs than EDF (25 vs 61) while delivering more total energy. That is a distributional choice, visible in the file, not hidden by the headline.</li>
+          <li>Live runs use a few hundred to ~1,200 evaluations; the committed results used 12,680 (GA) and 13,030 (PSO). Live numbers will not match the committed table exactly.</li>
+          <li>The scenario is one 100-EV office site. The paper's scale argument is about search cost, not about a claim that MILP is beaten at this size.</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Committed artifacts</h2>
+          <p>Downloadable straight from <code>results/final_unified/</code>.</p>
+        </div>
+        <div class="artifacts" id="artifact-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>EV charging optimization · Tier 2 demo</span>
+    <span>Committed numbers from <code>results/final_unified/</code></span>
+  </footer>
+
+  <div id="tooltip" class="tooltip" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
